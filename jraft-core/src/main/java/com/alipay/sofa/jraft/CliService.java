@@ -29,6 +29,7 @@ import com.alipay.sofa.jraft.option.CliOptions;
  *
  * @author boyan (boyan@alibaba-inc.com)
  *
+ * CLI 服务就是 Client CommandLine Service，是 jraft 在 raft group 节点提供的 RPC 服务中暴露了一系列用于管理 raft group 的服务接口
  * 2018-Apr-09 4:05:35 PM
  */
 public interface CliService extends Lifecycle<CliOptions> {

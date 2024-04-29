@@ -98,16 +98,20 @@ public class CounterServiceImpl implements CounterService {
     }
 
     private void applyOperation(final CounterOperation op, final CounterClosure closure) {
+        // not leader error
         if (!isLeader()) {
             handlerNotLeaderError(closure);
             return;
         }
 
         try {
+            // save original request
             closure.setCounterOperation(op);
             final Task task = new Task();
+            // serialize request
             task.setData(ByteBuffer.wrap(SerializerManager.getSerializer(SerializerManager.Hessian2).serialize(op)));
             task.setDone(closure);
+            // apply task
             this.counterServer.getNode().apply(task);
         } catch (CodecException e) {
             String errorMsg = "Fail to encode CounterOperation";

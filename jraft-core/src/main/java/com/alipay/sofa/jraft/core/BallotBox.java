@@ -94,6 +94,10 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
     /**
      * Called by leader, otherwise the behavior is undefined
      * Set logs in [first_log_index, last_log_index] are stable at |peer|.
+     *
+     * 如果响应来自 Follower 节点则会触发执行 BallotBox#commitAt 方法以检查当前批次的日志数据是否能够被提交，
+     * 即是否有超过半数的节点完成了对于该批次日志数据的复制操作，
+     * 如果是则会触发 Leader 节点将该批次的日志数据标记为 committed。
      */
     public boolean commitAt(final long firstLogIndex, final long lastLogIndex, final PeerId peer) {
         // TODO  use lock-free algorithm here?
@@ -113,13 +117,16 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
 
             final long startAt = Math.max(this.pendingIndex, firstLogIndex);
             Ballot.PosHint hint = new Ballot.PosHint();
+            // 遍历检查当前批次中的 LogEntry 是否有成功被过半数节点复制的
             for (long logIndex = startAt; logIndex <= lastLogIndex; logIndex++) {
                 final Ballot bl = this.pendingMetaQueue.get((int) (logIndex - this.pendingIndex));
                 hint = bl.grant(peer, hint);
+                // 当前 LogEntry 被过半数节点成功复制，记录 lastCommittedIndex
                 if (bl.isGranted()) {
                     lastCommittedIndex = logIndex;
                 }
             }
+            // 没有一条日志被过半数节点所成功复制，先返回
             if (lastCommittedIndex == 0) {
                 return true;
             }
@@ -129,14 +136,18 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
             // logs, since we use the new configuration to deal the quorum of the
             // removal request, we think it's safe to commit all the uncommitted
             // previous logs, which is not well proved right now
+            // 剔除已经被过半数节点复制的 LogIndex 对应的选票，
+            // Raft 保证一个 LogEntry 被提交之后，在此之前的 LogEntry 一定是 committed 状态
             this.pendingMetaQueue.removeFromFirst((int) (lastCommittedIndex - this.pendingIndex) + 1);
             LOG.debug("Node {} committed log fromIndex={}, toIndex={}.", this.opts.getNodeId(), this.pendingIndex,
                 lastCommittedIndex);
             this.pendingIndex = lastCommittedIndex + 1;
+            // 更新集群的 lastCommittedIndex 值
             this.lastCommittedIndex = lastCommittedIndex;
         } finally {
             this.stampedLock.unlockWrite(stamp);
         }
+        // 向状态机发布 COMMITTED 事件
         this.waiter.onCommitted(lastCommittedIndex);
         return true;
     }
@@ -198,6 +209,7 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
      * @return          returns true on success
      */
     public boolean appendPendingTask(final Configuration conf, final Configuration oldConf, final Closure done) {
+        // 创建并初始化选票
         final Ballot bl = new Ballot();
         if (!bl.init(conf, oldConf)) {
             LOG.error("Fail to init ballot.");
@@ -205,11 +217,14 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
         }
         final long stamp = this.stampedLock.writeLock();
         try {
+            // 节点成功 Leader 之后必须调用 BallotBox#resetPendingIndex 方法重置 pendingIndex 值
             if (this.pendingIndex <= 0) {
                 LOG.error("Node {} fail to appendingTask, pendingIndex={}.", this.opts.getNodeId(), this.pendingIndex);
                 return false;
             }
+            // 记录选票，用于检查是否赢得过半数选票
             this.pendingMetaQueue.add(bl);
+            // 记录 Task 的回调 done 对象，当对应的日志被 committed 时触发执行
             this.closureQueue.appendPendingClosure(done);
             return true;
         } finally {

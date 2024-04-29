@@ -32,6 +32,13 @@ import com.alipay.sofa.jraft.util.Utils;
 /**
  * A framework to implement a raft group service.
  *
+ * 创建和启动一个 raft group 节点的主要阶段：
+ *
+ * 实现并创建状态机实例
+ * 创建并设置好 NodeOptions 实例，指定存储路径，如果是空白启动，指定初始节点列表配置。
+ * 创建 Node 实例，并使用 NodeOptions 初始化。
+ * 创建并启动 RpcServer ，提供节点之间的通讯服务。
+ *
  * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Apr-08 7:53:03 PM

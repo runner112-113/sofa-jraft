@@ -306,6 +306,8 @@ public class LogManagerImpl implements LogManager {
         boolean doUnlock = true;
         this.writeLock.lock();
         try {
+            // 对于 Leader 节点而言，基于本地 lastLogIndex 值设置各个 LogEntry 的 logIndex
+            // 对于 Follower 节点而言，检查待复制的日志与本地已有的日志是否存在冲突，如果存在冲突则强行覆盖本地日志
             if (!entries.isEmpty() && !checkAndResolveConflict(entries, done, this.writeLock)) {
                 // If checkAndResolveConflict returns false, the done will be called in it.
                 entries.clear();
@@ -314,9 +316,12 @@ public class LogManagerImpl implements LogManager {
             for (int i = 0; i < entries.size(); i++) {
                 final LogEntry entry = entries.get(i);
                 // Set checksum after checkAndResolveConflict
+                // when options enable checksum then set checksum here
                 if (this.raftOptions.isEnableLogEntryChecksum()) {
                     entry.setChecksum(entry.checksum());
                 }
+                // entry type is  ENTRY_TYPE_CONFIGURATION
+                // 对于 ENTRY_TYPE_CONFIGURATION 类型的 LogEntry，记录集群配置信息
                 if (entry.getType() == EntryType.ENTRY_TYPE_CONFIGURATION) {
                     Configuration oldConf = new Configuration();
                     if (entry.getOldPeers() != null) {
@@ -327,6 +332,7 @@ public class LogManagerImpl implements LogManager {
                     this.configManager.add(conf);
                 }
             }
+            // store all log entries in memory
             if (!entries.isEmpty()) {
                 done.setFirstLogIndex(entries.get(0).getId().getIndex());
                 this.logsInMemory.addAll(entries);
@@ -334,6 +340,7 @@ public class LogManagerImpl implements LogManager {
             done.setEntries(entries);
 
             doUnlock = false;
+            // here will notify Replicators
             if (!wakeupAllWaiter(this.writeLock)) {
                 notifyLastLogIndexListeners();
             }
@@ -1004,6 +1011,7 @@ public class LogManagerImpl implements LogManager {
     @SuppressWarnings("NonAtomicOperationOnVolatileField")
     private boolean checkAndResolveConflict(final List<LogEntry> entries, final StableClosure done, final Lock lock) {
         final LogEntry firstLogEntry = ArrayDeque.peekFirst(entries);
+        // Leader 节点，基于 lastLogIndex 设置 logIndex 值
         if (firstLogEntry.getId().getIndex() == 0) {
             // Node is currently the leader and |entries| are from the user who
             // don't know the correct indexes the logs should assign to. So we have
@@ -1012,11 +1020,13 @@ public class LogManagerImpl implements LogManager {
                 entries.get(i).getId().setIndex(++this.lastLogIndex);
             }
             return true;
+            // Follower 节点
         } else {
             // Node is currently a follower and |entries| are from the leader. We
             // should check and resolve the conflicts between the local logs and
             // |entries|
             if (firstLogEntry.getId().getIndex() > this.lastLogIndex + 1) {
+                // 待写入的日志与本地已有的日志之间存在断层
                 ThreadPoolsFactory.runClosureInThread(this.groupId, done, new Status(RaftError.EINVAL,
                     "There's gap between first_index=%d and last_log_index=%d", firstLogEntry.getId().getIndex(),
                     this.lastLogIndex));
@@ -1032,20 +1042,24 @@ public class LogManagerImpl implements LogManager {
                 ThreadPoolsFactory.runClosureInThread(this.groupId, done);
                 return false;
             }
+            // 待追加的日志与本地已有的日志之前正好衔接上，直接更新 lastLogIndex
             if (firstLogEntry.getId().getIndex() == this.lastLogIndex + 1) {
                 // fast path
                 this.lastLogIndex = lastLogEntry.getId().getIndex();
+                // 说明待追加的日志与本地已有的日志之间存在交叉
             } else {
                 // Appending entries overlap the local ones. We should find if there
                 // is a conflicting index from which we should truncate the local
                 // ones.
                 int conflictingIndex = 0;
+                // 从头开始遍历寻找第一个 term 值不匹配的 logIndex
                 for (; conflictingIndex < entries.size(); conflictingIndex++) {
                     if (unsafeGetTerm(entries.get(conflictingIndex).getId().getIndex()) != entries
                         .get(conflictingIndex).getId().getTerm()) {
                         break;
                     }
                 }
+                // 日志数据存在冲突，将本地冲突之后的日志数据阶段
                 if (conflictingIndex != entries.size()) {
                     if (entries.get(conflictingIndex).getId().getIndex() <= this.lastLogIndex) {
                         // Truncate all the conflicting entries to make local logs
@@ -1055,6 +1069,7 @@ public class LogManagerImpl implements LogManager {
                     this.lastLogIndex = lastLogEntry.getId().getIndex();
                 } // else this is a duplicated AppendEntriesRequest, we have
                   // nothing to do besides releasing all the entries
+                // 将已经写入本地的日志数据从请求中剔除
                 if (conflictingIndex > 0) {
                     // Remove duplication
                     entries.subList(0, conflictingIndex).clear();
@@ -1100,6 +1115,7 @@ public class LogManagerImpl implements LogManager {
     private long notifyOnNewLog(final long expectedLastLogIndex, final WaitMeta wm) {
         this.writeLock.lock();
         try {
+            // 已经有新的日志可复制，或者当前 LogManager 已被停止
             if (expectedLastLogIndex != this.lastLogIndex || this.stopped) {
                 wm.errorCode = this.stopped ? RaftError.ESTOP.getNumber() : 0;
                 ThreadPoolsFactory.runInThread(this.groupId, () -> runOnNewLog(wm));
@@ -1110,6 +1126,7 @@ public class LogManagerImpl implements LogManager {
             	// Valid waitId starts from 1, skip 0.
             	waitId = this.nextWaitId = 1;
             }
+            // 记录等待的信息
             this.waitMap.put(waitId, wm);
             return waitId;
         } finally {

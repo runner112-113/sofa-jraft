@@ -45,6 +45,8 @@ public interface Node extends Lifecycle<NodeOptions>, Describer {
 
     /**
      * Get the leader peer id for redirect, null if absent.
+     *
+     * 获取当前 raft group 的 leader peerId，如果未知，返回 null
      */
     PeerId getLeaderId();
 
@@ -87,12 +89,16 @@ public interface Node extends Lifecycle<NodeOptions>, Describer {
     /**
      * Shutdown local replica node.
      *
+     * 用于停止一个 raft 节点
+     *
      * @param done callback
      */
     void shutdown(final Closure done);
 
     /**
      * Block the thread until the node is successfully stopped.
+     *
+     * 可以在 shutdown 调用后等待停止过程结束
      *
      * @throws InterruptedException if the current thread is interrupted
      *         while waiting
@@ -111,6 +117,10 @@ public interface Node extends Lifecycle<NodeOptions>, Describer {
      * |task.done|: If the data is successfully committed to the raft group. We
      *              will pass the ownership to #{@link StateMachine#onApply(Iterator)}.
      *              Otherwise we will specify the error and call it.
+     *
+     * 提交一个新任务到 raft group，此方法是线程安全并且非阻塞，
+     * 无论任务是否成功提交到 raft group，都会通过 task 关联的 closure done 通知到。
+     * 如果当前节点不是 leader，会直接失败通知 done closure。
      *
      * @param task task to apply
      */
@@ -265,6 +275,8 @@ public interface Node extends Lifecycle<NodeOptions>, Describer {
     /**
      * Start a snapshot immediately if possible. done.run() would be invoked when
      * the snapshot finishes, describing the detailed result.
+     *
+     * 触发当前节点执行一次 snapshot 保存操作，结果通过 done 通知
      *
      * @param done callback
      */

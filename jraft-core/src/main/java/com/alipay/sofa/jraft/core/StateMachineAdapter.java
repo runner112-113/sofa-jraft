@@ -32,6 +32,10 @@ import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
  * State machine adapter that implements all methods with default behavior
  * except {@link #onApply(com.alipay.sofa.jraft.Iterator)}.
  *
+ * 因为 StateMachine 接口的方法比较多，并且大多数方法可能不需要做一些业务处理，
+ * 因此 jraft 提供了一个 StateMachineAdapter 桥接类，方便适配实现状态机，
+ * 除了强制要实现 onApply 方法外，其他方法都提供了默认实现，也就是简单地打印日志，用户可以选择实现特定的方法
+ *
  * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Mar-30 10:32:27 AM

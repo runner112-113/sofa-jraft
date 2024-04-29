@@ -63,7 +63,7 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
     // A snapshot saving would be triggered every |snapshot_interval_s| seconds
     // if this was reset as a positive number
     // If |snapshot_interval_s| <= 0, the time based snapshot would be disabled.
-    //
+    // 自动 Snapshot 间隔时间，默认一个小时
     // Default: 3600 (1 hour)
     private int                             snapshotIntervalSecs   = 3600;
 
@@ -88,20 +88,27 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
     // configuration of the group, otherwise it would load configuration from
     // the existing environment.
     //
+    // 当节点是从一个空白状态启动（snapshot和log存储都为空），那么他会使用这个初始配置作为 raft group
+    // 的配置启动，否则会从存储中加载已有配置。
+    //
     // Default: A empty group
     private Configuration                   initialConf            = new Configuration();
 
     // The specific StateMachine implemented your business logic, which must be
     // a valid instance.
+    //  最核心的，属于本 raft 节点的应用状态机实例
     private StateMachine                    fsm;
 
     // Describe a specific LogStorage in format ${type}://${parameters}
+    // Raft 节点的日志存储路径，必须有
     private String                          logUri;
 
     // Describe a specific RaftMetaStorage in format ${type}://${parameters}
+    // Raft 节点的元信息存储路径，必须有
     private String                          raftMetaUri;
 
     // Describe a specific SnapshotStorage in format ${type}://${parameters}
+    // Raft 节点的 snapshot 存储路径，可选，不提供就关闭了 snapshot 功能。
     private String                          snapshotUri;
 
     // Snapshot temp directory for writing. Default is null(not present), jraft will use a `temp` dir under #{snapshotUri}
@@ -119,6 +126,7 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
 
     // If true, RPCs through raft_cli will be denied.
     // Default: false
+    // 是否关闭 Cli 服务，默认不关闭
     private boolean                         disableCli             = false;
 
     /**
@@ -127,6 +135,7 @@ public class NodeOptions extends RpcOptions implements Copiable<NodeOptions> {
     private boolean                         sharedTimerPool        = false;
     /**
      * Timer manager thread pool size
+     * 内部定时线程池大小，默认按照 cpu 个数计算，需要根据应用实际情况适当调
      */
     private int                             timerPoolSize          = Utils.cpus() * 3 > 20 ? 20 : Utils.cpus() * 3;
 

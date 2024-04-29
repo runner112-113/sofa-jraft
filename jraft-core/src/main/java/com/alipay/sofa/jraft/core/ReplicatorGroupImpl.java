@@ -109,10 +109,19 @@ public class ReplicatorGroupImpl implements ReplicatorGroup {
         return this.replicatorMap.get(peer);
     }
 
+    /**
+     *
+     * @param peer           目标 Follower 或 Learner 节点
+     * @param replicatorType 节点类型
+     * @param sync           synchronous
+     * @return
+     */
     @Override
     public boolean addReplicator(final PeerId peer, final ReplicatorType replicatorType, final boolean sync) {
+        // 在此之前应该先调用 ReplicatorGroup#resetTerm 方法
         Requires.requireTrue(this.commonOptions.getTerm() != 0);
         this.failureReplicators.remove(peer);
+        // 已建立复制关系，避免重复
         if (this.replicatorMap.containsKey(peer)) {
             return true;
         }
@@ -128,6 +137,7 @@ public class ReplicatorGroupImpl implements ReplicatorGroup {
                 return false;
             }
         }
+        // 创建并启动到目标节点的复制器
         final ThreadId rid = Replicator.start(opts, this.raftOptions);
         if (rid == null) {
             LOG.error("Fail to start replicator to peer={}, replicatorType={}, groupId={}.", peer, replicatorType,

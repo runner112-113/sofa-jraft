@@ -43,10 +43,21 @@ public class Task implements Serializable {
     private static final long serialVersionUID = 2971309899898274575L;
 
     /** Associated  task data*/
+    /**
+     * 任务的数据，用户应当将要复制的业务数据通过一定序列化方式（比如 java/hessian2) 序列化成一个 ByteBuffer，放到 task 里
+     */
     private ByteBuffer        data             = LogEntry.EMPTY_DATA;
     /** task closure, called when the data is successfully committed to the raft group or failures happen.*/
+    /**
+     *  任务的回调，在任务完成的时候通知此对象，无论成功还是失败。
+     *  这个 closure 将在StateMachine#onApply(iterator)方法应用到状态机的时候，可以拿到并调用，一般用于客户端应答的返回。
+     */
     private Closure           done;
     /** Reject this task if expectedTerm doesn't match the current term of this Node if the value is not -1, default is -1.*/
+    /**
+     * 任务提交时预期的 leader term，如果不提供(也就是默认值 -1 )，
+     * 在任务应用到状态机之前不会检查 leader 是否发生了变更，如果提供了（从状态机回调中获取，参见下文），那么在将任务应用到状态机之前，会检查 term 是否匹配，如果不匹配将拒绝该任务。
+     */
     private long              expectedTerm     = -1;
 
     public Task() {
