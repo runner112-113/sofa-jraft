@@ -306,6 +306,8 @@ public class LogManagerImpl implements LogManager {
         boolean doUnlock = true;
         this.writeLock.lock();
         try {
+            // 对于 Leader 节点而言，基于本地 lastLogIndex 值设置各个 LogEntry 的 logIndex
+            // 对于 Follower 节点而言，检查待复制的日志与本地已有的日志是否存在冲突，如果存在冲突则强行覆盖本地日志
             if (!entries.isEmpty() && !checkAndResolveConflict(entries, done, this.writeLock)) {
                 // If checkAndResolveConflict returns false, the done will be called in it.
                 entries.clear();
@@ -334,11 +336,13 @@ public class LogManagerImpl implements LogManager {
             done.setEntries(entries);
 
             doUnlock = false;
+            // 尝试触发等待新的可复制数据的回调，以继续向目标 Follower 节点发送数据
             if (!wakeupAllWaiter(this.writeLock)) {
                 notifyLastLogIndexListeners();
             }
 
             // publish event out of lock
+            // 将修正后的 LogEntry 数据封装成事件投递给 Disruptor 队列，事件类型为 OTHER
             this.diskQueue.publishEvent((event, sequence) -> {
               event.reset();
               event.type = EventType.OTHER;
@@ -451,8 +455,10 @@ public class LogManagerImpl implements LogManager {
 
         LogId flush() {
             if (this.size > 0) {
+                // 将数据落盘，并返回最新的 LogId
                 this.lastId = appendToStorage(this.toAppend);
                 for (int i = 0; i < this.size; i++) {
+                    // 清空缓存的 LogEntry 数据
                     this.storage.get(i).getEntries().clear();
                     Status st = null;
                     try {
@@ -461,6 +467,7 @@ public class LogManagerImpl implements LogManager {
                         } else {
                             st = Status.OK();
                         }
+                        // 应用回调
                         this.storage.get(i).run(st);
                     } catch (Throwable t) {
                         LOG.error("Fail to run closure with status: {}.", st, t);
@@ -1100,6 +1107,7 @@ public class LogManagerImpl implements LogManager {
     private long notifyOnNewLog(final long expectedLastLogIndex, final WaitMeta wm) {
         this.writeLock.lock();
         try {
+            // 已经有新的日志可复制，或者当前 LogManager 已被停止
             if (expectedLastLogIndex != this.lastLogIndex || this.stopped) {
                 wm.errorCode = this.stopped ? RaftError.ESTOP.getNumber() : 0;
                 ThreadPoolsFactory.runInThread(this.groupId, () -> runOnNewLog(wm));
@@ -1110,6 +1118,7 @@ public class LogManagerImpl implements LogManager {
             	// Valid waitId starts from 1, skip 0.
             	waitId = this.nextWaitId = 1;
             }
+            // 记录等待的信息
             this.waitMap.put(waitId, wm);
             return waitId;
         } finally {

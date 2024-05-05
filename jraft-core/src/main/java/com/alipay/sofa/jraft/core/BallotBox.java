@@ -51,6 +51,7 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
     private ClosureQueue              closureQueue;
     private final StampedLock         stampedLock        = new StampedLock();
     private long                      lastCommittedIndex = 0;
+    // 当前已经ok的日志索引+1（何为ok，就是大多数节点都持久化的）
     private long                      pendingIndex;
     private final SegmentList<Ballot> pendingMetaQueue   = new SegmentList<>(false);
     private BallotBoxOptions          opts;
@@ -94,6 +95,8 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
     /**
      * Called by leader, otherwise the behavior is undefined
      * Set logs in [first_log_index, last_log_index] are stable at |peer|.
+     * @param firstLogIndex 本次提交成功日志的起始值
+     * @param lastLogIndex 本次提交成功日志的终止值
      */
     public boolean commitAt(final long firstLogIndex, final long lastLogIndex, final PeerId peer) {
         // TODO  use lock-free algorithm here?
@@ -113,13 +116,16 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
 
             final long startAt = Math.max(this.pendingIndex, firstLogIndex);
             Ballot.PosHint hint = new Ballot.PosHint();
+            // 遍历检查当前批次中的 LogEntry 是否有成功被过半数节点复制的
             for (long logIndex = startAt; logIndex <= lastLogIndex; logIndex++) {
                 final Ballot bl = this.pendingMetaQueue.get((int) (logIndex - this.pendingIndex));
                 hint = bl.grant(peer, hint);
+                // 当前 LogEntry 被过半数节点成功复制，记录 lastCommittedIndex
                 if (bl.isGranted()) {
                     lastCommittedIndex = logIndex;
                 }
             }
+            // 没有一条日志被过半数节点所成功复制，先返回
             if (lastCommittedIndex == 0) {
                 return true;
             }
@@ -129,14 +135,18 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
             // logs, since we use the new configuration to deal the quorum of the
             // removal request, we think it's safe to commit all the uncommitted
             // previous logs, which is not well proved right now
+            // 剔除已经被过半数节点复制的 LogIndex 对应的选票，
+            // Raft 保证一个 LogEntry 被提交之后，在此之前的 LogEntry 一定是 committed 状态
             this.pendingMetaQueue.removeFromFirst((int) (lastCommittedIndex - this.pendingIndex) + 1);
             LOG.debug("Node {} committed log fromIndex={}, toIndex={}.", this.opts.getNodeId(), this.pendingIndex,
                 lastCommittedIndex);
             this.pendingIndex = lastCommittedIndex + 1;
+            // 更新集群的 lastCommittedIndex 值
             this.lastCommittedIndex = lastCommittedIndex;
         } finally {
             this.stampedLock.unlockWrite(stamp);
         }
+        // 向状态机发布 COMMITTED 事件
         this.waiter.onCommitted(lastCommittedIndex);
         return true;
     }

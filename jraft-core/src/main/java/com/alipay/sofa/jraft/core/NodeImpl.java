@@ -1350,6 +1350,8 @@ public class NodeImpl implements Node, RaftServerService {
         @Override
         public void run(final Status status) {
             if (status.isOk()) {
+                // 检查该批次中的日志数据是否被过半数的节点所成功复制，
+                // 如果存在复制成功的日志数据，则递增 lastCommittedIndex 值，并向状态机发布 COMMITTED 事件
                 NodeImpl.this.ballotBox.commitAt(this.firstLogIndex, this.firstLogIndex + this.nEntries - 1,
                     NodeImpl.this.serverId);
             } else {
@@ -1363,6 +1365,7 @@ public class NodeImpl implements Node, RaftServerService {
         this.writeLock.lock();
         try {
             final int size = tasks.size();
+            // 只有 Leader 节点允许处理 Task
             if (this.state != State.STATE_LEADER) {
                 final Status st = new Status();
                 if (this.state != State.STATE_TRANSFERRING) {
@@ -1373,6 +1376,7 @@ public class NodeImpl implements Node, RaftServerService {
                 LOG.debug("Node {} can't apply, status={}.", getNodeId(), st);
                 final List<Closure> dones = tasks.stream().map(ele -> ele.done)
                         .filter(Objects::nonNull).collect(Collectors.toList());
+                // 快速失败
                 ThreadPoolsFactory.runInThread(this.groupId, () -> {
                     for (final Closure done : dones) {
                         done.run(st);
@@ -1394,6 +1398,7 @@ public class NodeImpl implements Node, RaftServerService {
                     }
                     continue;
                 }
+                // 为每个 task 创建并初始化对应的选票，用于决策对应的 LogEntry 是否允许被提交
                 if (!this.ballotBox.appendPendingTask(this.conf.getConf(),
                     this.conf.isStable() ? null : this.conf.getOldConf(), task.done)) {
                     ThreadPoolsFactory.runClosureInThread(this.groupId, task.done, new Status(RaftError.EINTERNAL, "Fail to append task."));
@@ -1406,6 +1411,7 @@ public class NodeImpl implements Node, RaftServerService {
                 entries.add(task.entry);
                 task.reset();
             }
+            // 追加日志数据到本地文件系统，完成之后回调 LeaderStableClosure
             this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
             // update conf.first
             checkAndSetConfiguration(true);
@@ -1896,6 +1902,22 @@ public class NodeImpl implements Node, RaftServerService {
         }
     }
 
+    /**
+     * Follower 节点对于探针请求的整体响应流程可以概括为：
+     *
+     * 1. 如果当前节点处于非活跃状态，则响应错误；
+     * 2. 否则，解析请求来源节点的节点 ID，如果解析失败则响应错误；
+     * 3. 否则，校验请求中的 term 值是否小于当前节点，如果是则拒绝请求；
+     * 4. 否则，基于请求和当前节点本地状态判断是否需要执行 stepdown 操作；
+     * 5. 判断请求来源节点是否是当前节点所认可的 Leader 节点，如果不是则说明可能出现网络分区，尝试将响应中的 term 值加 1，以触发请求节点执行 stepdown 操作；
+     * 6. 否则，更新本地记录的最近一次收到来自 Leader 节点的时间戳；
+     * 7. 校验最近一次完成复制的 LogEntry 对应的 term 值是否与本地相匹配，如果不匹配则拒绝请求，并返回本地已知的最新 logIndex 值；
+     * 8. 否则，依据请求中的 committedIndex 值更新本地的 committedIndex 值，同时响应请求，返回本地已知的最新 logIndex 和 term 值。
+     * 通过这一系列的校验过程，Follower 节点会在针对当前探针请求的响应中附上本地已知的最新 logIndex 和 term 值，而 Leader 节点会依据响应选择正确位置的 LogEntry 发送给当前 Follower 节点。
+     * @param request   data of the entries to append
+     * @param done      callback
+     * @return
+     */
     @Override
     public Message handleAppendEntriesRequest(final AppendEntriesRequest request, final RpcRequestClosure done) {
         boolean doUnlock = true;
@@ -1904,6 +1926,7 @@ public class NodeImpl implements Node, RaftServerService {
         final int entriesCount = request.getEntriesCount();
         boolean success = false;
         try {
+            // 当前节点处于非活跃状态，响应错误
             if (!this.state.isActive()) {
                 LOG.warn("Node {} is not in active state, currTerm={}.", getNodeId(), this.currTerm);
                 return RpcFactoryHelper //
@@ -1912,8 +1935,10 @@ public class NodeImpl implements Node, RaftServerService {
                         "Node %s is not in active state, state %s.", getNodeId(), this.state.name());
             }
 
+            // 解析请求来源节点 ID
             final PeerId serverId = new PeerId();
             if (!serverId.parse(request.getServerId())) {
+                // 解析失败，响应错误
                 LOG.warn("Node {} received AppendEntriesRequest from {} serverId bad format.", getNodeId(),
                     request.getServerId());
                 return RpcFactoryHelper //
@@ -1923,6 +1948,7 @@ public class NodeImpl implements Node, RaftServerService {
             }
 
             // Check stale term
+            // 校验请求中的 term 值，如果小于当前节点，则拒绝请求并返回自己当前的 term 值
             if (request.getTerm() < this.currTerm) {
                 LOG.warn("Node {} ignore stale AppendEntriesRequest from {}, term={}, currTerm={}.", getNodeId(),
                     request.getServerId(), request.getTerm(), this.currTerm);
@@ -1933,7 +1959,11 @@ public class NodeImpl implements Node, RaftServerService {
             }
 
             // Check term and state to step down
+            // 基于请求和节点本地状态判断是否需要执行 stepdown
             checkStepDown(request.getTerm(), serverId);
+
+            // 请求来源节点并不是当前节点所知道的 Leader 节点，
+            // 可能出现网络分区，尝试将 term 值加 1，以触发 Leader 节点 stepdown
             if (!serverId.equals(this.leaderId)) {
                 LOG.error("Another peer {} declares that it is the leader at term {} which was occupied by leader {}.",
                     serverId, this.currTerm, this.leaderId);
@@ -1947,8 +1977,10 @@ public class NodeImpl implements Node, RaftServerService {
                     .build();
             }
 
+            // 更新本地记录的最近一次收到来自 Leader 节点请求的时间戳
             updateLastLeaderTimestamp(Utils.monotonicMs());
 
+            // 当前是复制日志的 AppendEntries 请求，但是本地正在安装快照，响应错误
             if (entriesCount > 0 && this.snapshotExecutor != null && this.snapshotExecutor.isInstallingSnapshot()) {
                 LOG.warn("Node {} received AppendEntriesRequest while installing snapshot.", getNodeId());
                 return RpcFactoryHelper //
@@ -1960,6 +1992,7 @@ public class NodeImpl implements Node, RaftServerService {
             final long prevLogIndex = request.getPrevLogIndex();
             final long prevLogTerm = request.getPrevLogTerm();
             final long localPrevLogTerm = this.logManager.getTerm(prevLogIndex);
+            // 请求中 logIndex 对应的 term 值与本地不匹配
             if (localPrevLogTerm != prevLogTerm) {
                 final long lastLogIndex = this.logManager.getLastLogIndex();
 
@@ -1975,8 +2008,10 @@ public class NodeImpl implements Node, RaftServerService {
                     .build();
             }
 
+            // 心跳或者探针请求
             if (entriesCount == 0) {
                 // heartbeat or probe request
+                // 返回本地当前的 term 值以及对应的 logIndex
                 final AppendEntriesResponse.Builder respBuilder = AppendEntriesResponse.newBuilder() //
                     .setSuccess(true) //
                     .setTerm(this.currTerm) //
@@ -1984,6 +2019,7 @@ public class NodeImpl implements Node, RaftServerService {
                 doUnlock = false;
                 this.writeLock.unlock();
                 // see the comments at FollowerStableClosure#run()
+                // 基于 Leader 的 committedIndex 更新本地的 lastCommittedIndex 值
                 this.ballotBox.setLastCommittedIndex(Math.min(request.getCommittedIndex(), prevLogIndex));
                 return respBuilder.build();
             }
@@ -2006,15 +2042,20 @@ public class NodeImpl implements Node, RaftServerService {
             }
 
             final List<RaftOutter.EntryMeta> entriesList = request.getEntriesList();
+            // 遍历逐一解析请求中的 LogEntry 数据，记录到 entries 列表中
             for (int i = 0; i < entriesCount; i++) {
                 index++;
+                // 获取 LogEntry 元数据信息
                 final RaftOutter.EntryMeta entry = entriesList.get(i);
 
+                // 基于元数据和数据体构造 LogEntry 对象
                 final LogEntry logEntry = logEntryFromMeta(index, allData, entry);
 
                 if (logEntry != null) {
                     // Validate checksum
+                    // 如果启用了 checksum 机制，则校验 checksum 值
                     if (this.raftOptions.isEnableLogEntryChecksum() && logEntry.isCorrupted()) {
+                        // checksum 值不匹配，说明数据可能被篡改
                         long realChecksum = logEntry.checksum();
                         LOG.error(
                             "Corrupted log entry received from leader, index={}, term={}, expectedChecksum={}, realChecksum={}",
@@ -2033,6 +2074,7 @@ public class NodeImpl implements Node, RaftServerService {
 
             final FollowerStableClosure closure = new FollowerStableClosure(request, AppendEntriesResponse.newBuilder()
                 .setTerm(this.currTerm), this, done, this.currTerm);
+            // 将 LogEntry 数据写入本地磁盘
             this.logManager.appendEntries(entries, closure);
             // update configuration after _log_manager updated its memory status
             checkAndSetConfiguration(true);
@@ -2056,13 +2098,16 @@ public class NodeImpl implements Node, RaftServerService {
     }
 
     private LogEntry logEntryFromMeta(final long index, final ByteBuffer allData, final RaftOutter.EntryMeta entry) {
+        // 忽略 ENTRY_TYPE_UNKNOWN 类型的 LogEntry 数据
         if (entry.getType() != EnumOutter.EntryType.ENTRY_TYPE_UNKNOWN) {
+            // 给 LogEntry 对象填充基本的元数据信息
             final LogEntry logEntry = new LogEntry();
             logEntry.setId(new LogId(index, entry.getTerm()));
             logEntry.setType(entry.getType());
             if (entry.hasChecksum()) {
                 logEntry.setChecksum(entry.getChecksum()); // since 1.2.6
             }
+            // 基于元数据中记录的数据长度获取对应的 LogEntry 数据体，并填充到 LogEntry 对象中
             final long dataLen = entry.getDataLen();
             if (dataLen > 0) {
                 final byte[] bs = new byte[(int) dataLen];
@@ -2071,6 +2116,7 @@ public class NodeImpl implements Node, RaftServerService {
                 logEntry.setData(ByteBuffer.wrap(bs));
             }
 
+            // 针对 ENTRY_TYPE_CONFIGURATION 类型的 LogEntry，解析并填充集群节点配置数据
             if (entry.getPeersCount() > 0) {
                 if (entry.getType() != EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION) {
                     throw new IllegalStateException(
@@ -2078,6 +2124,7 @@ public class NodeImpl implements Node, RaftServerService {
                                 + entry.getType());
                 }
 
+                // 填充集群节点配置信息
                 fillLogEntryPeers(entry, logEntry);
             } else if (entry.getType() == EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION) {
                 throw new IllegalStateException(
