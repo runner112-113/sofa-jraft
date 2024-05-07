@@ -279,12 +279,18 @@ public abstract class Recyclers<T> {
         // than the stack owner recycles: when we run out of items in our stack we iterate this collection
         // to scavenge those that can be reused. this permits us to incur minimal thread synchronisation whilst
         // still recycling all items.
+
+        // 所属的Recycler
         final Recyclers<T> parent;
         final Thread thread;
+        // 存储缓存数据的数组
         private DefaultHandle[] elements;
+        // 对象池的最大大小，默认4k
         private final int maxCapacity;
+        // 缓存的DefaultHandle对象个数
         private int size;
 
+        // WeakOrderQueue链表的三个重要指针
         private volatile WeakOrderQueue head;
         private WeakOrderQueue cursor, prev;
 
@@ -331,11 +337,13 @@ public abstract class Recyclers<T> {
 
         boolean scavenge() {
             // continue an existing scavenge, if any
+            // 尝试从 WeakOrderQueue 中转移对象到Stack中
             if (scavengeSome()) {
                 return true;
             }
 
             // reset our scavenge cursor
+            // 如果迁移失败，就会重置cursor指针到head节点
             prev = null;
             cursor = head;
             return false;

@@ -197,6 +197,7 @@ public class FSMCallerImpl implements FSMCaller {
         this.lastAppliedIndex.set(opts.getBootstrapId().getIndex());
         notifyLastAppliedIndexUpdated(this.lastAppliedIndex.get());
         this.lastAppliedTerm = opts.getBootstrapId().getTerm();
+        // 创建和启动了一个 Disruptor 队列，用于异步处理各种状态机事件
         this.disruptor = DisruptorBuilder.<ApplyTask> newInstance() //
             .setEventFactory(new ApplyTaskFactory()) //
             .setRingBufferSize(opts.getDisruptorBufferSize()) //
@@ -240,6 +241,11 @@ public class FSMCallerImpl implements FSMCaller {
         this.lastAppliedLogIndexListeners.add(listener);
     }
 
+    /**
+     * 往该 Disruptor 队列写入具体的状态机事件
+     * @param tpl
+     * @return
+     */
     private boolean enqueueTask(final EventTranslator<ApplyTask> tpl) {
         if (this.shutdownLatch != null) {
             // Shutting down

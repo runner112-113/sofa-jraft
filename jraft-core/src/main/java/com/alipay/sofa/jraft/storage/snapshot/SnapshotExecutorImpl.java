@@ -237,6 +237,7 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
         this.logManager = opts.getLogManager();
         this.fsmCaller = opts.getFsmCaller();
         this.term = opts.getInitTerm();
+        // 创建快照存储服务，基于 LocalSnapshotStorage 实现类
         this.snapshotStorage = this.node.getServiceFactory().createSnapshotStorage(nodeOptions);
         if (opts.isFilterBeforeCopyRemote()) {
             this.snapshotStorage.setFilterBeforeCopyRemote();
@@ -244,6 +245,8 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
         if (opts.getSnapshotThrottle() != null) {
             this.snapshotStorage.setSnapshotThrottle(opts.getSnapshotThrottle());
         }
+
+        // 初始化快照存储服务，主要工作是从本地删除除最后一次快照所生成的快照文件之外的其它快照数据文件
         if (!this.snapshotStorage.init(null)) {
             LOG.error("Fail to init snapshot storage.");
             return false;
@@ -255,10 +258,12 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
                 tmp.setServerAddr(opts.getAddr());
             }
         }
+        // 打开快照文件读取器
         final SnapshotReader reader = this.snapshotStorage.open();
         if (reader == null) {
             return true;
         }
+        // 加载快照元数据信息
         this.loadingSnapshotMeta = reader.load();
         if (this.loadingSnapshotMeta == null) {
             LOG.error("Fail to load meta from {}.", snapshotUri);
@@ -269,6 +274,7 @@ public class SnapshotExecutorImpl implements SnapshotExecutor {
         this.loadingSnapshot = true;
         this.runningJobs.incrementAndGet();
         final FirstSnapshotLoadDone done = new FirstSnapshotLoadDone(reader);
+        // 加载最近一次的快照数据
         Requires.requireTrue(this.fsmCaller.onSnapshotLoad(done));
         try {
             done.waitForRun();

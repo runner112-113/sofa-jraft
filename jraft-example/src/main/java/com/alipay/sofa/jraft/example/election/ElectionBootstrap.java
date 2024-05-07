@@ -42,6 +42,7 @@ public class ElectionBootstrap {
         final ElectionNodeOptions electionOpts = new ElectionNodeOptions();
         electionOpts.setDataPath(dataPath);
         electionOpts.setGroupId(groupId);
+        // 当前节点的 IP 和端口号
         electionOpts.setServerAddress(serverIdStr);
         electionOpts.setInitialServerAddressList(initialConfStr);
 

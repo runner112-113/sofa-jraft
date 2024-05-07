@@ -46,8 +46,11 @@ public interface LogManager extends Lifecycle<LogManagerOptions>, Describer {
      */
     abstract class StableClosure implements Closure {
 
+        // 该批次消息的第一条日志索引
         protected long           firstLogIndex = 0;
+        // 日志批次集合
         protected List<LogEntry> entries;
+        // 日志数量
         protected int            nEntries;
 
         public StableClosure() {

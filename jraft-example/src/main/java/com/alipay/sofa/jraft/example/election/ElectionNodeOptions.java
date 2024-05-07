@@ -24,12 +24,13 @@ import com.alipay.sofa.jraft.option.NodeOptions;
  */
 public class ElectionNodeOptions {
 
+    // 存储数据的路径：用于存储日志、元数据，以及快照数据
     private String      dataPath;
     // raft group id
     private String      groupId;
-    // ip:port
+    // ip:port  当前节点
     private String      serverAddress;
-    // ip:port,ip:port,ip:port
+    // ip:port,ip:port,ip:port  初始构成 JRaft 集群的节点列表
     private String      initialServerAddressList;
     // raft node options
     private NodeOptions nodeOptions;

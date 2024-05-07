@@ -41,6 +41,9 @@ import com.alipay.sofa.jraft.util.SegmentList;
  * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Apr-04 2:32:10 PM
+ *
+ *
+ * 投票机制是 Raft 算法运行的基础，JRaft 在实现上为每个节点都设置了一个选票箱 BallotBox 实例，用于对 LogEntry 是否提交进行仲裁
  */
 @ThreadSafe
 public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
@@ -140,6 +143,7 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
             this.pendingMetaQueue.removeFromFirst((int) (lastCommittedIndex - this.pendingIndex) + 1);
             LOG.debug("Node {} committed log fromIndex={}, toIndex={}.", this.opts.getNodeId(), this.pendingIndex,
                 lastCommittedIndex);
+            // pendingIndex 表示正在处理的logEntry索引
             this.pendingIndex = lastCommittedIndex + 1;
             // 更新集群的 lastCommittedIndex 值
             this.lastCommittedIndex = lastCommittedIndex;
@@ -219,7 +223,9 @@ public class BallotBox implements Lifecycle<BallotBoxOptions>, Describer {
                 LOG.error("Node {} fail to appendingTask, pendingIndex={}.", this.opts.getNodeId(), this.pendingIndex);
                 return false;
             }
+            // 当前任务的票箱追加到 SegmentList<Ballot>
             this.pendingMetaQueue.add(bl);
+            // 将当前task的closure添加到LinkedList中
             this.closureQueue.appendPendingClosure(done);
             return true;
         } finally {

@@ -181,14 +181,17 @@ public class LogManagerImpl implements LogManager {
             lsOpts.setConfigurationManager(this.configManager);
             lsOpts.setLogEntryCodecFactory(opts.getLogEntryCodecFactory());
 
+            // 初始化日志存储服务
             if (!this.logStorage.init(lsOpts)) {
                 LOG.error("Fail to init logStorage");
                 return false;
             }
+            // 基于日志初始化本地 logIndex 和 term 值
             this.firstLogIndex = this.logStorage.getFirstLogIndex();
             this.lastLogIndex = this.logStorage.getLastLogIndex();
             this.diskId = new LogId(this.lastLogIndex, getTermFromLogStorage(this.lastLogIndex));
             this.fsmCaller = opts.getFsmCaller();
+            // 创建对应的 Disruptor 队列，用于异步处理日志操作相关的事件
             this.disruptor = DisruptorBuilder.<StableClosureEvent> newInstance() //
                     .setEventFactory(new StableClosureEventFactory()) //
                     .setRingBufferSize(opts.getDisruptorBufferSize()) //
@@ -319,6 +322,7 @@ public class LogManagerImpl implements LogManager {
                 if (this.raftOptions.isEnableLogEntryChecksum()) {
                     entry.setChecksum(entry.checksum());
                 }
+                // 配置变更消息
                 if (entry.getType() == EntryType.ENTRY_TYPE_CONFIGURATION) {
                     Configuration oldConf = new Configuration();
                     if (entry.getOldPeers() != null) {
@@ -331,6 +335,7 @@ public class LogManagerImpl implements LogManager {
             }
             if (!entries.isEmpty()) {
                 done.setFirstLogIndex(entries.get(0).getId().getIndex());
+                // 存入内存
                 this.logsInMemory.addAll(entries);
             }
             done.setEntries(entries);
@@ -1009,8 +1014,18 @@ public class LogManagerImpl implements LogManager {
     }
 
     @SuppressWarnings("NonAtomicOperationOnVolatileField")
+    /**
+     * 对于 Leader 节点而言，因为 Raft 算法的强 Leader 设计，所以 Leader 的日志数据是整个集群日志数据的标杆，不存在冲突一说。
+     * 因此，对于 Leader 节点而言，上述实现只是简单的为当前 LogEntry 对象修正对应的 logIndex 值，但是对于 Follower 和 Learner 节点而言则免不了出现日志数据冲突，分为以下几种情况：
+     *
+     * 1. 待写入的日志数据与本地已有的日志数据存在断层，此时只能返回错误。
+     * 2. 待写入的日志数据相对于本地已有的日志数据更老，即最大的 logIndex 小于等于本地已经写入的日志数据的 logIndex，直接忽略。
+     * 3. 待写入的日志数据与本地已有的日志数据正好衔接上，直接递增 lastLogIndex 即可。
+     * 4. 待写入的日志数据与本地已有的日志数据存在重叠，此时需要判断是否存在冲突，并强行覆盖本地存在冲突的数据。
+     */
     private boolean checkAndResolveConflict(final List<LogEntry> entries, final StableClosure done, final Lock lock) {
         final LogEntry firstLogEntry = ArrayDeque.peekFirst(entries);
+        // Leader 节点，基于 lastLogIndex 设置 logIndex 值
         if (firstLogEntry.getId().getIndex() == 0) {
             // Node is currently the leader and |entries| are from the user who
             // don't know the correct indexes the logs should assign to. So we have
@@ -1019,6 +1034,8 @@ public class LogManagerImpl implements LogManager {
                 entries.get(i).getId().setIndex(++this.lastLogIndex);
             }
             return true;
+
+            // Follower 节点
         } else {
             // Node is currently a follower and |entries| are from the leader. We
             // should check and resolve the conflicts between the local logs and
@@ -1029,6 +1046,7 @@ public class LogManagerImpl implements LogManager {
                     this.lastLogIndex));
                 return false;
             }
+            // 待写入的所有日志的 logIndex 都小于已经应用的日志的最大 logIndex，直接返回
             final long appliedIndex = this.appliedId.getIndex();
             final LogEntry lastLogEntry = ArrayDeque.peekLast(entries);
             if (lastLogEntry.getId().getIndex() <= appliedIndex) {
@@ -1039,20 +1057,25 @@ public class LogManagerImpl implements LogManager {
                 ThreadPoolsFactory.runClosureInThread(this.groupId, done);
                 return false;
             }
+            // 待追加的日志与本地已有的日志之前正好衔接上，直接更新 lastLogIndex
             if (firstLogEntry.getId().getIndex() == this.lastLogIndex + 1) {
                 // fast path
                 this.lastLogIndex = lastLogEntry.getId().getIndex();
+
+                // 说明待追加的日志与本地已有的日志之间存在交叉
             } else {
                 // Appending entries overlap the local ones. We should find if there
                 // is a conflicting index from which we should truncate the local
                 // ones.
                 int conflictingIndex = 0;
+                // 从头开始遍历寻找第一个 term 值不匹配的 logIndex
                 for (; conflictingIndex < entries.size(); conflictingIndex++) {
                     if (unsafeGetTerm(entries.get(conflictingIndex).getId().getIndex()) != entries
                         .get(conflictingIndex).getId().getTerm()) {
                         break;
                     }
                 }
+                // 日志数据存在冲突，将本地冲突之后的日志数据阶段
                 if (conflictingIndex != entries.size()) {
                     if (entries.get(conflictingIndex).getId().getIndex() <= this.lastLogIndex) {
                         // Truncate all the conflicting entries to make local logs
@@ -1062,6 +1085,7 @@ public class LogManagerImpl implements LogManager {
                     this.lastLogIndex = lastLogEntry.getId().getIndex();
                 } // else this is a duplicated AppendEntriesRequest, we have
                   // nothing to do besides releasing all the entries
+                // 将已经写入本地的日志数据从请求中剔除
                 if (conflictingIndex > 0) {
                     // Remove duplication
                     entries.subList(0, conflictingIndex).clear();
@@ -1158,17 +1182,24 @@ public class LogManagerImpl implements LogManager {
         wm.onNewLog.onNewLog(wm.arg, wm.errorCode);
     }
 
+    /**
+     * 校验的逻辑主要是确保快照数据与当前数据的连续性，不允许存在数据断层。
+     * @return
+     */
     @Override
     public Status checkConsistency() {
         this.readLock.lock();
         try {
             Requires.requireTrue(this.firstLogIndex > 0);
             Requires.requireTrue(this.lastLogIndex >= 0);
+            // 未生成过快照，所以 firstLogIndex 应该是 1
             if (this.lastSnapshotId.equals(new LogId(0, 0))) {
                 if (this.firstLogIndex == 1) {
                     return Status.OK();
                 }
                 return new Status(RaftError.EIO, "Missing logs in (0, %d)", this.firstLogIndex);
+
+                // 生成过快照，则需要保证快照与当前数据的连续性
             } else {
                 if (this.lastSnapshotId.getIndex() >= this.firstLogIndex - 1
                     && this.lastSnapshotId.getIndex() <= this.lastLogIndex) {

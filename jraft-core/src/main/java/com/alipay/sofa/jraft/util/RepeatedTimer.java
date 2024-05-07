@@ -83,6 +83,7 @@ public abstract class RepeatedTimer implements Describer {
     public void run() {
         this.invoking = true;
         try {
+            // 调用业务逻辑
             onTrigger();
         } catch (final Throwable t) {
             LOG.error("Run timer failed.", t);
@@ -91,16 +92,19 @@ public abstract class RepeatedTimer implements Describer {
         this.lock.lock();
         try {
             this.invoking = false;
+            // 计时器被停止
             if (this.stopped) {
                 this.running = false;
                 invokeDestroyed = this.destroyed;
             } else {
+                // 本次任务调度完成，重新发起调度下一轮任务
                 this.timeout = null;
                 schedule();
             }
         } finally {
             this.lock.unlock();
         }
+        // 在计时器被停止时回调 onDestroy 方法
         if (invokeDestroyed) {
             onDestroy();
         }
@@ -134,9 +138,11 @@ public abstract class RepeatedTimer implements Describer {
     public void start() {
         this.lock.lock();
         try {
+            // 计时器已经被销毁，不允许再被启动
             if (this.destroyed) {
                 return;
             }
+            // 计时器处于运行中，不需要再启动
             if (!this.stopped) {
                 return;
             }
@@ -144,6 +150,7 @@ public abstract class RepeatedTimer implements Describer {
             if (this.running) {
                 return;
             }
+            // 标识计时器已经在运行
             this.running = true;
             schedule();
         } finally {
@@ -174,9 +181,11 @@ public abstract class RepeatedTimer implements Describer {
     }
 
     private void schedule() {
+        // 正常来说，这里的 timeout 应该为 null，否则说明上一轮任务还未执行完毕，尝试取消运行
         if (this.timeout != null) {
             this.timeout.cancel();
         }
+        // 创建一个新的任务
         final TimerTask timerTask = timeout -> {
             try {
                 RepeatedTimer.this.run();
@@ -184,6 +193,7 @@ public abstract class RepeatedTimer implements Describer {
                 LOG.error("Run timer task failed, taskName={}.", RepeatedTimer.this.name, t);
             }
         };
+        // 提交给 Timer 延迟运行（仅运行一次），这里会调用 adjustTimeout 方法，用于调整计时周期
         this.timeout = this.timer.newTimeout(timerTask, adjustTimeout(this.timeoutMs), TimeUnit.MILLISECONDS);
     }
 

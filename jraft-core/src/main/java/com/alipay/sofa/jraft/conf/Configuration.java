@@ -292,6 +292,7 @@ public class Configuration implements Iterable<PeerId>, Copiable<Configuration> 
             final PeerId peer = new PeerId();
             int index;
             boolean isLearner = false;
+            // learn is /learn suffix
             if ((index = peerStr.indexOf(LEARNER_POSTFIX)) > 0) {
                 // It's a learner
                 peerStr = peerStr.substring(0, index);

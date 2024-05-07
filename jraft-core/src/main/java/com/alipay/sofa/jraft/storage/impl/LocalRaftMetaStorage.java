@@ -43,6 +43,11 @@ import com.alipay.sofa.jraft.util.Utils;
  * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Mar-26 7:30:36 PM
+ *
+ * 基于本地文件系统采用 protobuf 协议对元数据执行序列化之后进行存储。
+ *
+ * LocalRaftMetaStorage 在初始化时（即执行 LocalRaftMetaStorage#init 方法期间）会从本地文件系统加载并反序列化元数据，以初始化 currentTerm 和 votedFor 属性值。
+ * 运行期间对于这两个属性值的更改全部记录在内存中，并在关闭时（即执行 LocalRaftMetaStorage#shutdown 方法期间）将内存中的数据序列化后落盘
  */
 public class LocalRaftMetaStorage implements RaftMetaStorage {
 
