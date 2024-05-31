@@ -638,21 +638,29 @@ public class NodeImpl implements Node, RaftServerService {
         boolean doUnlock = true;
         this.writeLock.lock();
         try {
+            // 预选举必须由 Follower 节点发起
             if (this.state != State.STATE_FOLLOWER) {
                 return;
             }
+            // 与当前 Leader 节点的租约还有效，暂不发起预选举
             if (isCurrentLeaderValid()) {
                 return;
             }
+
+            /* 尝试开始发起预选举 */
+
+            // 清空本地记录的 leaderId
             resetLeaderId(PeerId.emptyPeer(), new Status(RaftError.ERAFTTIMEDOUT, "Lost connection from leader %s.",
                 this.leaderId));
 
             // Judge whether to launch a election.
+            // 基于节点优先级判断是否继续发起预选举
             if (!allowLaunchElection()) {
                 return;
             }
 
             doUnlock = false;
+            // 发起预选举
             preVote();
 
         } finally {
@@ -1014,6 +1022,7 @@ public class NodeImpl implements Node, RaftServerService {
         this.configManager = new ConfigurationManager();
 
         // 初始化 Task 处理相关的 disruptor 队列，用于异步处理业务调用 Node#apply 方法向集群提交的 Task 列表
+        // client task --> applyDisruptor ---> consume by LogEntryAndClosureHandler
         this.applyDisruptor = DisruptorBuilder.<LogEntryAndClosure> newInstance() //
             .setRingBufferSize(this.raftOptions.getDisruptorBufferSize()) //
             .setEventFactory(new LogEntryAndClosureFactory()) //
@@ -2763,12 +2772,14 @@ public class NodeImpl implements Node, RaftServerService {
         long oldTerm;
         try {
             LOG.info("Node {} term {} start preVote.", getNodeId(), this.currTerm);
+            // 当前节点正在安装快照，则放弃预选举
             if (this.snapshotExecutor != null && this.snapshotExecutor.isInstallingSnapshot()) {
                 LOG.warn(
                     "Node {} term {} doesn't do preVote when installing snapshot as the configuration may be out of date.",
                     getNodeId(), this.currTerm);
                 return;
             }
+            // 当前节点不是一个有效的节点
             if (!this.conf.contains(this.serverId)) {
                 LOG.warn("Node {} can't do preVote as it is not in conf <{}>.", getNodeId(), this.conf);
                 return;
@@ -2778,6 +2789,7 @@ public class NodeImpl implements Node, RaftServerService {
             this.writeLock.unlock();
         }
 
+        // 从本地磁盘获取最新的 LogId
         final LogId lastLogId = this.logManager.getLastLogId(true);
 
         boolean doUnlock = true;
@@ -2788,7 +2800,9 @@ public class NodeImpl implements Node, RaftServerService {
                 LOG.warn("Node {} raise term {} when get lastLogId.", getNodeId(), this.currTerm);
                 return;
             }
+            // 初始化预选举选票
             this.prevVoteCtx.init(this.conf.getConf(), this.conf.isStable() ? null : this.conf.getOldConf());
+            // 遍历向除自己以外的所有连通节点发送 RequestVote RPC 请求，以征集选票
             for (final PeerId peer : this.conf.listPeers()) {
                 if (peer.equals(this.serverId)) {
                     continue;
@@ -2799,19 +2813,23 @@ public class NodeImpl implements Node, RaftServerService {
                 }
                 final OnPreVoteRpcDone done = new OnPreVoteRpcDone(peer, this.currTerm);
                 done.request = RequestVoteRequest.newBuilder() //
-                    .setPreVote(true) // it's a pre-vote request.
+                    .setPreVote(true) // it's a pre-vote request. 标记为预选举
                     .setGroupId(this.groupId) //
                     .setServerId(this.serverId.toString()) //
                     .setPeerId(peer.toString()) //
-                    .setTerm(this.currTerm + 1) // next term
+                    .setTerm(this.currTerm + 1) // next term 预选举阶段不会真正递增 term 值
                     .setLastLogIndex(lastLogId.getIndex()) //
                     .setLastLogTerm(lastLogId.getTerm()) //
                     .build();
+                // 发送请求
                 this.rpcService.preVote(peer.getEndpoint(), done.request, done);
             }
+            // 自己给自己投上一票
             this.prevVoteCtx.grant(this.serverId);
+            // 检查是否赢得选票
             if (this.prevVoteCtx.isGranted()) {
                 doUnlock = false;
+                // 如果赢得选票，则继续发起选举进程
                 electSelf();
             }
         } finally {

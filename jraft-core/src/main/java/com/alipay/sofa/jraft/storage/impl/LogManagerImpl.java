@@ -885,12 +885,16 @@ public class LogManagerImpl implements LogManager {
         LastLogIdClosure c;
         this.readLock.lock();
         try {
+            // 直接返回内存中记录的 lastLogIndex，以及对应的 term 值
             if (!isFlush) {
                 if (this.lastLogIndex >= this.firstLogIndex) {
                     return new LogId(this.lastLogIndex, unsafeGetTerm(this.lastLogIndex));
                 }
                 return this.lastSnapshotId;
+
+                // 将内存中的数据刷盘，并返回最新的 logIndex 和对应的 term 值
             } else {
+                // 生成快照之后未产生新的数据
                 if (this.lastLogIndex == this.lastSnapshotId.getIndex()) {
                     return this.lastSnapshotId;
                 }
@@ -899,7 +903,10 @@ public class LogManagerImpl implements LogManager {
         } finally {
             this.readLock.unlock();
         }
+        // 往消息队列中发布一个 LAST_LOG_ID 事件
         offerEvent(c, EventType.LAST_LOG_ID);
+
+        // 等待刷盘完成
         try {
             c.await();
         } catch (final InterruptedException e) {
@@ -1183,7 +1190,9 @@ public class LogManagerImpl implements LogManager {
     }
 
     /**
-     * 校验的逻辑主要是确保快照数据与当前数据的连续性，不允许存在数据断层。
+     * 校验的逻辑主要是确保快照数据与当前数据的连续性，不允许存在数据断层, 分两种情况：
+     * 1. 未生成过快照，所以 firstLogIndex 应该是 1
+     * 2. 生成过快照，则需要保证快照与当前数据的连续性
      * @return
      */
     @Override

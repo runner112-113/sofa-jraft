@@ -243,6 +243,7 @@ public class FSMCallerImpl implements FSMCaller {
 
     /**
      * 往该 Disruptor 队列写入具体的状态机事件
+     * EventTranslator<ApplyTask>  ---> disruptor ---> consume by ApplyTaskHandler
      * @param tpl
      * @return
      */
