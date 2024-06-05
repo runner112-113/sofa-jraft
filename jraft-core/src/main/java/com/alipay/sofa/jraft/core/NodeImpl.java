@@ -1786,11 +1786,23 @@ public class NodeImpl implements Node, RaftServerService {
         }
     }
 
+    /**
+     *  整体响应预选举 RequestVote 请求的执行流程可以概括为：
+     *
+     * 1. 如果当前节点处于非活跃状态，则响应错误；
+     * 2. 否则，解析候选节点的节点 ID，如果解析出错，则响应错误；
+     * 3. 否则，如果当前节点与对应 Leader 节点之间的租约仍然有效，则拒绝投票；
+     * 4. 否则，如果候选节点的 term 值相较于当前节点小，则拒绝投票；如果当前节点正好是 Leader 节点，还需要检查候选节点与当前节点之间的复制关系；
+     * 5. 否则，获取本地最新的 logIndex 和对应的 term 值，如果候选节点的 term 和 logIndex 值更新，则同意投票，否则拒绝投票。
+     *
+     * 如果当前节点是 Leader 节点，但是仍然有节点发起预选举进程，则说明当前节点与目标节点之间的复制关系存在问题，需要重新建立复制关系，并启动对应的复制器 Replicator。
+     */
     @Override
     public Message handlePreVoteRequest(final RequestVoteRequest request) {
         boolean doUnlock = true;
         this.writeLock.lock();
         try {
+            // 当前节点处于非活跃状态，响应错误
             if (!this.state.isActive()) {
                 LOG.warn("Node {} is not in active state, currTerm={}.", getNodeId(), this.currTerm);
                 return RpcFactoryHelper //
@@ -1798,6 +1810,7 @@ public class NodeImpl implements Node, RaftServerService {
                     .newResponse(RequestVoteResponse.getDefaultInstance(), RaftError.EINVAL,
                         "Node %s is not in active state, state %s.", getNodeId(), this.state.name());
             }
+            // 解析发起投票的节点 ID
             final PeerId candidateId = new PeerId();
             if (!candidateId.parse(request.getServerId())) {
                 LOG.warn("Node {} received PreVoteRequest from {} serverId bad format.", getNodeId(),
@@ -1810,21 +1823,25 @@ public class NodeImpl implements Node, RaftServerService {
             boolean granted = false;
             // noinspection ConstantConditions
             do {
+                // 不是有效的结点 拒绝投票
                 if (!this.conf.contains(candidateId)) {
                     LOG.warn("Node {} ignore PreVoteRequest from {} as it is not in conf <{}>.", getNodeId(),
                         request.getServerId(), this.conf);
                     break;
                 }
+                // 当前节点与对应 leader 节点之间的租约仍然有效，拒绝投票
                 if (this.leaderId != null && !this.leaderId.isEmpty() && isCurrentLeaderValid()) {
                     LOG.info(
                         "Node {} ignore PreVoteRequest from {}, term={}, currTerm={}, because the leader {}'s lease is still valid.",
                         getNodeId(), request.getServerId(), request.getTerm(), this.currTerm, this.leaderId);
                     break;
                 }
+                // 发起投票节点的 term 值小于当前节点，拒绝投票
                 if (request.getTerm() < this.currTerm) {
                     LOG.info("Node {} ignore PreVoteRequest from {}, term={}, currTerm={}.", getNodeId(),
                         request.getServerId(), request.getTerm(), this.currTerm);
                     // A follower replicator may not be started when this node become leader, so we must check it.
+                    // 如果当前节点是 leader 节点，检查与发起投票节点之间的复制关系
                     checkReplicator(candidateId);
                     break;
                 }
@@ -1835,11 +1852,15 @@ public class NodeImpl implements Node, RaftServerService {
                 doUnlock = false;
                 this.writeLock.unlock();
 
+                // 获取本地最新的 LogId
                 final LogId lastLogId = this.logManager.getLastLogId(true);
 
                 doUnlock = true;
                 this.writeLock.lock();
+                // 封装请求中的 logIndex 和 term 值
                 final LogId requestLastLogId = new LogId(request.getLastLogIndex(), request.getLastLogTerm());
+                // 如果请求的 term 值更大，或者在 term 值相等的前提下，请求的 logIndex 不小于当前节点的 logIndex 值，
+                // 则投上自己的一票
                 granted = requestLastLogId.compareTo(lastLogId) >= 0;
 
                 LOG.info(
@@ -2818,20 +2839,35 @@ public class NodeImpl implements Node, RaftServerService {
         }
     }
 
+    /**
+     *  对于预选举 RequestVote 响应的整体处理流程可以概括如下：
+     *
+     * 1. 校验当前节点是否仍然是 FOLLOWER 角色，如果不是则忽略响应，可能已经预选举成功了；
+     * 2. 否则，校验当前节点的 term 值是否发生变化，如果是则忽略响应；
+     * 3. 否则，如果目标节点的 term 值较当前节点更大，则忽略响应，并执行 stepdown；
+     * 4. 否则，如果目标节点拒绝投票，则忽略响应；
+     * 5. 否则，如果目标节点同意投票，则更新得票数，并检查是否预选举成功，如果是则进入正式投票环节。
+     *
+     * 如果当前节点在预选举期间收到 term 值更大的 RequestVote 响应，则会执行 stepdown 逻辑。
+     * 此时节点的角色仍然是 FOLLOWER，所以除了重置本地状态和再次启动预选举计时器之外，一个重要的工作就是更新当前节点的 term 值，以保证与当前集群已知的最大 term 值看齐。
+     */
     public void handlePreVoteResponse(final PeerId peerId, final long term, final RequestVoteResponse response) {
         boolean doUnlock = true;
         this.writeLock.lock();
         try {
+            // 当前节点已经不是 FOLLOWER 角色，可能已经预选举成功了，忽略响应
             if (this.state != State.STATE_FOLLOWER) {
                 LOG.warn("Node {} received invalid PreVoteResponse from {}, state not in STATE_FOLLOWER but {}.",
                     getNodeId(), peerId, this.state);
                 return;
             }
+            // 当前节点的 term 值已经发生变化，忽略响应
             if (term != this.currTerm) {
                 LOG.warn("Node {} received invalid PreVoteResponse from {}, term={}, currTerm={}.", getNodeId(),
                     peerId, term, this.currTerm);
                 return;
             }
+            // 目标节点的 term 值较当前节点更大，需要 stepdown，主要是更新本地的 term 值
             if (response.getTerm() > this.currTerm) {
                 LOG.warn("Node {} received invalid PreVoteResponse from {}, term {}, expect={}.", getNodeId(), peerId,
                     response.getTerm(), this.currTerm);
@@ -2842,10 +2878,13 @@ public class NodeImpl implements Node, RaftServerService {
             LOG.info("Node {} received PreVoteResponse from {}, term={}, granted={}.", getNodeId(), peerId,
                 response.getTerm(), response.getGranted());
             // check granted quorum?
+            // 目标节点同意投票
             if (response.getGranted()) {
                 this.prevVoteCtx.grant(peerId);
+                // 检查是否预选举成功
                 if (this.prevVoteCtx.isGranted()) {
                     doUnlock = false;
+                    // 进入正式投票环节
                     electSelf();
                 }
             }
