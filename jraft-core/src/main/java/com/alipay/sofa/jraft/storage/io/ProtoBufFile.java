@@ -117,6 +117,7 @@ public class ProtoBufFile {
             msg.writeTo(output);
             output.flush();
         }
+        // 刷盘
         if (sync) {
             Utils.fsync(file);
         }

@@ -44,6 +44,7 @@ public final class RaftServiceFactory {
      */
     public static Node createAndInitRaftNode(final String groupId, final PeerId serverId, final NodeOptions opts) {
         final Node ret = createRaftNode(groupId, serverId);
+        // 初始化node
         if (!ret.init(opts)) {
             throw new IllegalStateException("Fail to init node, please see the logs to find the reason.");
         }

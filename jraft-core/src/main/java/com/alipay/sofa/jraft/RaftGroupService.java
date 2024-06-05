@@ -35,6 +35,8 @@ import com.alipay.sofa.jraft.util.Utils;
  * @author boyan (boyan@alibaba-inc.com)
  *
  * 2018-Apr-08 7:53:03 PM
+ *
+ * 一个辅助编程框架类，方便地“组装”起一个 raft group 节点。
  */
 public class RaftGroupService {
 
